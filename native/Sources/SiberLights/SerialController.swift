@@ -70,7 +70,10 @@ final class SerialController: ObservableObject {
     }
 
     private func poll() {
-        micSilent = MUSIC_EFFECTS.contains(effect) && audio.isSilent()
+        // only republish on real change — a periodic @Published write would
+        // needlessly invalidate observers every 2s
+        let silent = MUSIC_EFFECTS.contains(effect) && audio.isSilent()
+        if silent != micSilent { micSilent = silent }
         if SerialController.findPort() != nil {
             noDeviceTicks = 0
             if !isConnected && !userDisconnected { connect() }

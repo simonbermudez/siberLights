@@ -23,6 +23,11 @@ struct ContentView: View {
                     .foregroundStyle(controller.isConnected ? .yellow : .secondary)
                 Text("siberLights").font(.headline)
                 Spacer()
+                if controller.micSilent {
+                    Image(systemName: "mic.slash")
+                        .font(.caption).foregroundStyle(.orange)
+                        .help("Music effect active but no audio detected")
+                }
                 Circle()
                     .fill(controller.isConnected ? Color.green : Color.secondary)
                     .frame(width: 8, height: 8)
