@@ -17,6 +17,8 @@ let STATIC_EFFECTS = [
 let MUSIC_EFFECTS = [
     "Spectrum", "Pulse", "VU Meter", "Center Burst",
     "Rainbow Beat", "Beat Flash", "Ripples", "Bass & Treble",
+    "Mirror Spectrum", "Dual VU", "Color Organ", "Fireworks",
+    "Energy Comet", "Bass Pump", "Flow", "Meter Peak",
 ]
 
 /// hue/sat/value in 0...1 -> RGB bytes
@@ -56,6 +58,10 @@ final class EffectEngine {
     private var ripples: [Double] = []
     private var ripplePrev = false
     private var btSparkle: [Double] = []
+    private var fireworks: [(pos: Double, radius: Double, hue: Double)] = []
+    private var fireworksPrev = false
+    private var flowPhase = 0.0
+    private var meterPeak = 0.0
 
     private func sized(_ arr: inout [Double], _ n: Int) {
         if arr.count != n { arr = [Double](repeating: 0, count: n) }
@@ -187,7 +193,7 @@ final class EffectEngine {
 
     /// Music-reactive effects. `bands` are 24 smoothed energies (0...1),
     /// `level` an overall loudness (0...1), `beat` a kick-drum flag.
-    func renderMusic(effect: String, n: Int, color: RGB, speed spd: Double,
+    func renderMusic(effect: String, n: Int, t: Double, color: RGB, speed spd: Double,
                      bands: [Double], level: Double, beat: Bool) -> [RGB] {
         let r = Double(color.r), g = Double(color.g), b = Double(color.b)
         let nb = bands.count
@@ -274,6 +280,110 @@ final class EffectEngine {
                 RGB(r: byte(r * k + (255 - r * k) * btSparkle[i]),
                     g: byte(g * k + (255 - g * k) * btSparkle[i]),
                     b: byte(b * k + (255 - b * k) * btSparkle[i]))
+            }
+
+        case "Mirror Spectrum":
+            // bass at the center, treble toward both ends
+            let c = Double(n - 1) / 2
+            let halfN = max(1.0, Double(n) / 2)
+            return (0..<n).map { i in
+                let d = abs(Double(i) - c) / halfN
+                let v = pow(bands[min(nb - 1, Int(d * Double(nb)))], 1.5)
+                return hsv(0.66 * d, 1, v)
+            }
+
+        case "Dual VU":
+            // level bars grow inward from both ends
+            let lit = Int(level * Double(n) / 2)
+            let halfN = max(1.0, Double(n) / 2)
+            return (0..<n).map { i in
+                let dist = min(i, n - 1 - i)
+                guard dist < lit else { return .black }
+                let frac = Double(dist) / halfN
+                return hsv(0.33 * max(0.0, 1 - frac * 1.3), 1, 1)
+            }
+
+        case "Color Organ":
+            // three fixed zones driven by low / mid / high frequency energy
+            let third = max(1, nb / 3)
+            func bandMean(_ lo: Int, _ hi: Int) -> Double {
+                var s = 0.0
+                for k in lo..<hi { s += bands[k] }
+                return s / Double(max(1, hi - lo))
+            }
+            let low = bandMean(0, third)
+            let mid = bandMean(third, 2 * third)
+            let high = bandMean(2 * third, nb)
+            let seg = max(1, n / 3)
+            return (0..<n).map { i in
+                if i < seg { return RGB(r: byte(255 * low), g: 0, b: 0) }
+                else if i < 2 * seg { return RGB(r: 0, g: byte(255 * mid), b: 0) }
+                else { return RGB(r: 0, g: 0, b: byte(255 * high)) }
+            }
+
+        case "Fireworks":
+            // each beat launches a colored burst at a random spot
+            if beat && !fireworksPrev {
+                fireworks.append((pos: Double.random(in: 0..<Double(n)),
+                                  radius: 0, hue: Double.random(in: 0..<1)))
+            }
+            fireworksPrev = beat
+            let grow = Double(n) * 0.03 * max(0.3, spd)
+            fireworks = fireworks.map { (pos: $0.pos, radius: $0.radius + grow, hue: $0.hue) }
+                                 .filter { $0.radius < Double(n) * 0.5 }
+            return (0..<n).map { i in
+                var rr = 0.0, gg = 0.0, bb = 0.0
+                for fw in fireworks {
+                    let ring = max(0.0, 1.0 - abs(abs(Double(i) - fw.pos) - fw.radius) / (Double(n) * 0.05 + 1))
+                    let fade = max(0.0, 1.0 - fw.radius / (Double(n) * 0.5))
+                    let k = ring * fade
+                    if k > 0 {
+                        let col = hsv(fw.hue, 1, 1)
+                        rr += Double(col.r) * k; gg += Double(col.g) * k; bb += Double(col.b) * k
+                    }
+                }
+                return RGB(r: byte(rr), g: byte(gg), b: byte(bb))
+            }
+
+        case "Energy Comet":
+            // a comet whose tail length and brightness track the loudness
+            let head = (t * Double(n) * 0.5 * spd).truncatingRemainder(dividingBy: Double(n))
+            let tailLen = 0.1 + 0.5 * level
+            let bright = 0.2 + 0.8 * level
+            return (0..<n).map { i in
+                var d = (head - Double(i)).truncatingRemainder(dividingBy: Double(n))
+                if d < 0 { d += Double(n) }
+                var k = max(0.0, 1.0 - d / (Double(n) * tailLen))
+                k = k * k * bright
+                return RGB(r: byte(r * k), g: byte(g * k), b: byte(b * k))
+            }
+
+        case "Bass Pump":
+            // whole strip punches with the kick / bass energy only
+            let bass = (bands[0] + bands[1] + bands[2] + bands[3]) / 4
+            let k = pow(bass, 1.5)
+            return [RGB](repeating: RGB(r: byte(r * k), g: byte(g * k), b: byte(b * k)), count: n)
+
+        case "Flow":
+            // a hue gradient that scrolls faster and brighter with the music
+            flowPhase += (0.005 + level * 0.06) * spd
+            let bright = 0.3 + 0.7 * level
+            return (0..<n).map { i in
+                var h = (flowPhase + Double(i) / Double(n)).truncatingRemainder(dividingBy: 1.0)
+                if h < 0 { h += 1 }
+                return hsv(h, 1, bright)
+            }
+
+        case "Meter Peak":
+            // VU meter with a slowly falling peak-hold dot
+            let lit = Int(level * Double(n))
+            meterPeak = max(Double(lit), meterPeak - Double(n) * 0.01)
+            let peakIdx = Int(meterPeak)
+            return (0..<n).map { i in
+                if i == peakIdx && peakIdx < n { return RGB(r: 255, g: 255, b: 255) }
+                guard i < lit else { return .black }
+                let frac = Double(i) / Double(max(1, n - 1))
+                return hsv(0.33 * max(0.0, 1 - frac * 1.3), 1, 1)
             }
 
         default:

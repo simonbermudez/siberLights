@@ -191,7 +191,7 @@ final class SerialController: ObservableObject {
         let px: [RGB]
         if MUSIC_EFFECTS.contains(s.effect) {
             let (bands, level, beat) = audio.snapshot()
-            px = engine.renderMusic(effect: s.effect, n: LED_COUNT, color: s.color,
+            px = engine.renderMusic(effect: s.effect, n: LED_COUNT, t: elapsed, color: s.color,
                                     speed: s.speed, bands: bands, level: level, beat: beat)
         } else {
             px = engine.render(effect: s.effect, n: LED_COUNT, t: elapsed,
