@@ -17,6 +17,9 @@ final class SerialController: ObservableObject {
     @Published var color: RGB { didSet { sync(); save() } }
     @Published var brightness: Double { didSet { sync(); save() } }   // 1...100
     @Published var speed: Double { didSet { sync(); save() } }        // 1...100
+    @Published var sensitivity: Double { didSet { sync(); save() } }  // 1...100
+
+    private let audio = AudioAnalyzer()
 
     private struct Snapshot {
         var effect = "Solid"
@@ -44,6 +47,7 @@ final class SerialController: ObservableObject {
         }
         brightness = defaults.object(forKey: "brightness") as? Double ?? 100
         speed = defaults.object(forKey: "speed") as? Double ?? 50
+        sensitivity = defaults.object(forKey: "sensitivity") as? Double ?? 50
         sync()
         connect()
     }
@@ -54,6 +58,7 @@ final class SerialController: ObservableObject {
         defaults.set([Int(color.r), Int(color.g), Int(color.b)], forKey: "color")
         defaults.set(brightness, forKey: "brightness")
         defaults.set(speed, forKey: "speed")
+        defaults.set(sensitivity, forKey: "sensitivity")
     }
 
     /// copy control values into the lock-protected snapshot for the render loop
@@ -63,6 +68,13 @@ final class SerialController: ObservableObject {
                         brightness: brightness / 100.0,
                         speed: speed / 12.5)   // 1...100 -> 0.08...8
         lock.unlock()
+        audio.gain = sensitivity / 50.0
+        updateAudio()
+    }
+
+    /// open the mic only while a music effect is selected (privacy).
+    private func updateAudio() {
+        if MUSIC_EFFECTS.contains(effect) { audio.start() } else { audio.stop() }
     }
 
     // MARK: - port discovery
@@ -126,6 +138,12 @@ final class SerialController: ObservableObject {
         }
     }
 
+    /// stop everything for app termination
+    func shutdown() {
+        audio.stop()
+        disconnect()
+    }
+
     // MARK: - render loop
     private func startLoop() {
         let t = DispatchSource.makeTimerSource(queue: queue)
@@ -139,8 +157,15 @@ final class SerialController: ObservableObject {
         guard fd >= 0 else { return }
         lock.lock(); let s = snap; lock.unlock()
         let elapsed = Date().timeIntervalSince(startTime)
-        let px = engine.render(effect: s.effect, n: LED_COUNT, t: elapsed,
+        let px: [RGB]
+        if MUSIC_EFFECTS.contains(s.effect) {
+            let (bands, level, beat) = audio.snapshot()
+            px = engine.renderMusic(effect: s.effect, n: LED_COUNT, color: s.color,
+                                    speed: s.speed, bands: bands, level: level, beat: beat)
+        } else {
+            px = engine.render(effect: s.effect, n: LED_COUNT, t: elapsed,
                                color: s.color, speed: s.speed)
+        }
         var frame = [UInt8]([0x41, 0x64, 0x61, 0, 0, UInt8(LED_COUNT)])
         frame.reserveCapacity(6 + 3 * LED_COUNT)
         let bri = s.brightness

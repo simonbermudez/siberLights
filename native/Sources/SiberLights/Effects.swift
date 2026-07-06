@@ -14,6 +14,11 @@ let STATIC_EFFECTS = [
     "Strobe", "Police", "Candle", "Off",
 ]
 
+let MUSIC_EFFECTS = [
+    "Spectrum", "Pulse", "VU Meter", "Center Burst",
+    "Rainbow Beat", "Beat Flash", "Ripples", "Bass & Treble",
+]
+
 /// hue/sat/value in 0...1 -> RGB bytes
 func hsv(_ h: Double, _ s: Double, _ v: Double) -> RGB {
     let i = Int(floor(h * 6))
@@ -44,6 +49,13 @@ final class EffectEngine {
     private var sparkle: [Double] = []
     private var confetti: [RGB] = []
     private var candleK = 0.8
+    // music-effect state
+    private var rbeatPhase = 0.0
+    private var rbeatPrev = false
+    private var bflashV = 0.0
+    private var ripples: [Double] = []
+    private var ripplePrev = false
+    private var btSparkle: [Double] = []
 
     private func sized(_ arr: inout [Double], _ n: Int) {
         if arr.count != n { arr = [Double](repeating: 0, count: n) }
@@ -167,6 +179,102 @@ final class EffectEngine {
             candleK = max(0.35, min(1.0, candleK))
             let k = candleK
             return [RGB](repeating: RGB(r: byte(r * k), g: byte(g * k), b: byte(b * k)), count: n)
+
+        default:
+            return [RGB](repeating: .black, count: n)
+        }
+    }
+
+    /// Music-reactive effects. `bands` are 24 smoothed energies (0...1),
+    /// `level` an overall loudness (0...1), `beat` a kick-drum flag.
+    func renderMusic(effect: String, n: Int, color: RGB, speed spd: Double,
+                     bands: [Double], level: Double, beat: Bool) -> [RGB] {
+        let r = Double(color.r), g = Double(color.g), b = Double(color.b)
+        let nb = bands.count
+
+        switch effect {
+        case "Spectrum":
+            return (0..<n).map { i in
+                let v = pow(bands[min(nb - 1, i * nb / n)], 1.5)
+                return hsv(0.66 * (1 - Double(i) / Double(n)), 1, v)
+            }
+
+        case "Pulse":
+            let k = 0.04 + 0.96 * pow(level, 1.3)
+            if beat {
+                return [RGB](repeating: RGB(r: byte(r * k + (255 - r * k) * 0.5),
+                                            g: byte(g * k + (255 - g * k) * 0.5),
+                                            b: byte(b * k + (255 - b * k) * 0.5)), count: n)
+            }
+            return [RGB](repeating: RGB(r: byte(r * k), g: byte(g * k), b: byte(b * k)), count: n)
+
+        case "VU Meter":
+            let lit = Int(level * Double(n))
+            return (0..<n).map { i in
+                guard i < lit else { return .black }
+                let frac = Double(i) / Double(max(1, n - 1))
+                return hsv(0.33 * max(0.0, 1 - frac * 1.3), 1, 1)
+            }
+
+        case "Center Burst":
+            let half = max(1.0, Double(n - 1) / 2)
+            let c = Double(n - 1) / 2
+            let ext = pow(level, 1.2) * (half + 1)
+            return (0..<n).map { i in
+                let d = abs(Double(i) - c)
+                if beat && d < half * 0.15 { return RGB(r: 255, g: 255, b: 255) }
+                let k = max(0.0, min(1.0, ext - d))
+                return RGB(r: byte(r * k), g: byte(g * k), b: byte(b * k))
+            }
+
+        case "Rainbow Beat":
+            if beat && !rbeatPrev { rbeatPhase += 0.13 }
+            rbeatPrev = beat
+            let bri = 0.1 + 0.9 * level
+            return (0..<n).map { i in
+                hsv((rbeatPhase + Double(i) / Double(n) * 0.5).truncatingRemainder(dividingBy: 1.0), 1, bri)
+            }
+
+        case "Beat Flash":
+            bflashV = beat ? 1.0 : bflashV * 0.80
+            let k = bflashV
+            return [RGB](repeating: RGB(r: byte(r * k), g: byte(g * k), b: byte(b * k)), count: n)
+
+        case "Ripples":
+            if beat && !ripplePrev { ripples.append(0.0) }
+            ripplePrev = beat
+            let step = Double(n) * 0.02 * max(0.3, spd)
+            ripples = ripples.map { $0 + step }.filter { $0 < Double(n) }
+            let c = Double(n - 1) / 2
+            let half = max(1.0, Double(n - 1) / 2)
+            return (0..<n).map { i in
+                let d = abs(Double(i) - c)
+                var k = 0.0
+                for rad in ripples {
+                    let ring = max(0.0, 1.0 - abs(d - rad) / (Double(n) * 0.06 + 1))
+                    let fade = max(0.0, 1.0 - rad / (half * 1.1))
+                    k = max(k, ring * fade)
+                }
+                return RGB(r: byte(r * k), g: byte(g * k), b: byte(b * k))
+            }
+
+        case "Bass & Treble":
+            let bass = (bands[0] + bands[1] + bands[2] + bands[3] + bands[4]) / 5
+            let trebStart = nb * 2 / 3
+            var treb = 0.0
+            for i in trebStart..<nb { treb += bands[i] }
+            treb /= Double(max(1, nb - trebStart))
+            if btSparkle.count != n { btSparkle = [Double](repeating: 0, count: n) }
+            for i in 0..<n { btSparkle[i] *= 0.80 }
+            if Double.random(in: 0..<1) < min(0.9, treb * 1.5) {
+                btSparkle[Int.random(in: 0..<n)] = 1.0
+            }
+            let k = pow(bass, 1.2)
+            return (0..<n).map { i in
+                RGB(r: byte(r * k + (255 - r * k) * btSparkle[i]),
+                    g: byte(g * k + (255 - g * k) * btSparkle[i]),
+                    b: byte(b * k + (255 - b * k) * btSparkle[i]))
+            }
 
         default:
             return [RGB](repeating: .black, count: n)

@@ -32,9 +32,14 @@ struct ContentView: View {
 
             Divider()
 
-            // effect
+            // effect — static and music grouped in one native menu
             Picker("Effect", selection: $controller.effect) {
-                ForEach(STATIC_EFFECTS, id: \.self) { Text($0).tag($0) }
+                Section("Static") {
+                    ForEach(STATIC_EFFECTS, id: \.self) { Text($0).tag($0) }
+                }
+                Section("Music") {
+                    ForEach(MUSIC_EFFECTS, id: \.self) { Text($0).tag($0) }
+                }
             }
             .pickerStyle(.menu)
 
@@ -68,6 +73,13 @@ struct ContentView: View {
                 Text("Speed").font(.caption).foregroundStyle(.secondary)
                 Slider(value: $controller.speed, in: 1...100)
             }
+            VStack(alignment: .leading, spacing: 2) {
+                let isMusic = MUSIC_EFFECTS.contains(controller.effect)
+                Text("Music sensitivity").font(.caption)
+                    .foregroundStyle(isMusic ? .secondary : Color.secondary.opacity(0.4))
+                Slider(value: $controller.sensitivity, in: 1...100)
+                    .disabled(!isMusic)
+            }
 
             Divider()
 
@@ -78,7 +90,7 @@ struct ContentView: View {
                 }
                 Spacer()
                 Button("Quit") {
-                    controller.disconnect()
+                    controller.shutdown()
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                         NSApplication.shared.terminate(nil)
                     }
