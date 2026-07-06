@@ -21,8 +21,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         popover.behavior = .transient
         popover.animates = false
-        popover.contentViewController = NSHostingController(
+        let hosting = NSHostingController(
             rootView: ContentView().environmentObject(controller))
+        // keep the popover sized to the SwiftUI content — without this the
+        // popover keeps a stale height when conditional rows appear (e.g. the
+        // notification scene row) and the top of the panel gets clipped
+        hosting.sizingOptions = .preferredContentSize
+        popover.contentViewController = hosting
     }
 
     @objc private func togglePopover(_ sender: Any?) {
