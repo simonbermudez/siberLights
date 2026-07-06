@@ -21,6 +21,7 @@ final class SerialController: ObservableObject {
     @Published var brightness: Double { didSet { sync(); save() } }   // 1...100
     @Published var speed: Double { didSet { sync(); save() } }        // 1...100
     @Published var sensitivity: Double { didSet { sync(); save() } }  // 1...100
+    @Published var followScreen: Bool { didSet { updateOverride(); save() } }  // gate: lights off while display asleep
     @Published var screenReversed: Bool { didSet { screen.reversed = screenReversed; save() } }
 
     private let audio = AudioAnalyzer()
@@ -62,6 +63,7 @@ final class SerialController: ObservableObject {
         brightness = defaults.object(forKey: "brightness") as? Double ?? 100
         speed = defaults.object(forKey: "speed") as? Double ?? 50
         sensitivity = defaults.object(forKey: "sensitivity") as? Double ?? 50
+        followScreen = defaults.object(forKey: "followScreen") as? Bool ?? true
         screenReversed = defaults.bool(forKey: "screenReversed")
         screen.reversed = screenReversed
         sync()
@@ -96,13 +98,21 @@ final class SerialController: ObservableObject {
             case NSWorkspace.screensDidWakeNotification.rawValue: self.screensAsleep = false
             default: break
             }
-            // sleep wins over screensaver (the saver keeps "running" unseen)
-            let override: String? = self.screensAsleep ? "Off"
-                : (self.screensaverActive ? "Screen Sync" : nil)
-            if override != self.effectOverride {
-                self.effectOverride = override
-                self.sync()
-            }
+            self.updateOverride()
+        }
+    }
+
+    /// Recompute the system-state effect override. Display sleep forces the
+    /// lights Off — but only when the "Turn off with display" toggle is on;
+    /// otherwise a running screensaver switches to Screen Sync. The user's
+    /// saved effect is untouched and resumes once both clear.
+    private func updateOverride() {
+        // sleep wins over screensaver (the saver keeps "running" unseen)
+        let override: String? = (screensAsleep && followScreen) ? "Off"
+            : (screensaverActive ? "Screen Sync" : nil)
+        if override != effectOverride {
+            effectOverride = override
+            sync()
         }
     }
 
@@ -144,6 +154,7 @@ final class SerialController: ObservableObject {
         defaults.set(brightness, forKey: "brightness")
         defaults.set(speed, forKey: "speed")
         defaults.set(sensitivity, forKey: "sensitivity")
+        defaults.set(followScreen, forKey: "followScreen")
         defaults.set(screenReversed, forKey: "screenReversed")
     }
 

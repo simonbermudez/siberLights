@@ -99,6 +99,14 @@ struct ContentView: View {
                     .disabled(!isMusic)
             }
 
+            Toggle(isOn: $controller.followScreen) {
+                Text("Turn off with display")
+                    .font(.caption)
+            }
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .help("Blank the strip while the display sleeps, restore it on wake")
+
             Divider()
 
             HStack {
