@@ -13,6 +13,17 @@ final class ScreenSampler: NSObject, SCStreamOutput, SCStreamDelegate {
     private let stripFraction = 0.12
     /// per-frame exponential smoothing (higher = snappier, lower = calmer)
     private let alpha = 0.45
+    /// saturation boost on the averaged color; averaging pulls toward gray
+    private let saturation = 1.6
+    /// screen pixels are sRGB-encoded but the LEDs are linear; without this
+    /// the strip lifts every midtone and looks washed out
+    private let gamma = 2.2
+    /// drive each LED's strongest channel toward 255 so the strip runs at
+    /// full brightness while keeping the hue: 0 = off, 1 = always full
+    private let boost = 1.0
+    /// cap on the boost gain so near-black stays black instead of dark
+    /// noise flaring up to full brightness
+    private let maxBoostGain = 4.0
 
     var reversed = false                  // flip if the strip runs right-to-left
     private(set) var noPermission = false // Screen Recording TCC not granted
@@ -220,11 +231,30 @@ final class ScreenSampler: NSObject, SCStreamOutput, SCStreamDelegate {
             for c in 0..<3 {
                 smooth[gi * 3 + c] += (avg[led * 3 + c] - smooth[gi * 3 + c]) * alpha
             }
-            colors[gi] = RGB(r: UInt8(max(0, min(255, smooth[gi * 3]))),
-                             g: UInt8(max(0, min(255, smooth[gi * 3 + 1]))),
-                             b: UInt8(max(0, min(255, smooth[gi * 3 + 2]))))
+            colors[gi] = corrected(r: smooth[gi * 3], g: smooth[gi * 3 + 1],
+                                   b: smooth[gi * 3 + 2])
         }
         lock.unlock()
+    }
+
+    /// Re-saturate around luma (grays stay gray, mixed colors get their hue
+    /// back), gamma-encode for the linear LEDs, then push the strongest
+    /// channel toward 255 so the strip runs at full brightness.
+    private func corrected(r: Double, g: Double, b: Double) -> RGB {
+        let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b
+        func encode(_ v: Double) -> Double {
+            let sat = max(0, min(255, luma + (v - luma) * saturation))
+            return pow(sat / 255, gamma) * 255
+        }
+        var er = encode(r), eg = encode(g), eb = encode(b)
+        let peak = max(er, eg, eb)
+        if peak > 0 {
+            let gain = 1 + (min(255 / peak, maxBoostGain) - 1) * boost
+            er *= gain; eg *= gain; eb *= gain
+        }
+        return RGB(r: UInt8(min(255, er) + 0.5),
+                   g: UInt8(min(255, eg) + 0.5),
+                   b: UInt8(min(255, eb) + 0.5))
     }
 
     // MARK: - readout (render loop)
