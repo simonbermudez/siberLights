@@ -7,6 +7,17 @@ replace the vendor software entirely.
 The strip presents as a WCH **CH340** USB-to-serial device (`1a86:7523`). This project
 talks to it directly over serial, so no vendor app, no cloud, no telemetry.
 
+## Two implementations
+
+- **`native/`** — a native **Swift / SwiftUI** menu bar app (recommended). Tiny, fast,
+  renders proper native controls, and integrates cleanly with macOS. This is the app to
+  install.
+- **Python** (repo root) — the original reference implementation (rumps menu bar app +
+  tkinter window app). Useful for reading the protocol and effects logic in a
+  higher-level language; kept for reference.
+
+Both speak the identical serial protocol and implement the same 24 effects.
+
 ## Features
 
 - **Menu bar app** (`menubar_app.py`) — the primary UI, a native macOS status-bar menu.
@@ -45,38 +56,47 @@ s = serial.Serial("/dev/cu.usbserial-14220", 115200)
 s.write(b"Ada\x00\x00" + bytes([65]) + bytes([255, 0, 0]) * 65)  # all red
 ```
 
-## Setup
+The CH340 serial driver is built into macOS 11+ — no extra kernel driver needed.
+
+## Native app (recommended)
+
+Requires the Swift toolchain (Xcode or Command Line Tools — no full Xcode needed).
+
+```bash
+cd native
+./build.sh install     # build, bundle, sign, copy to /Applications, load LaunchAgent, launch
+# or just: ./build.sh  -> build/SiberLights.app without installing
+```
+
+`install` also registers a LaunchAgent that auto-launches the app when the strip is
+plugged in; the app auto-quits ~6s after it's unplugged.
+
+### Native layout
+
+| File | Purpose |
+|------|---------|
+| `native/Sources/SiberLights/SerialController.swift` | Serial port + 30fps render loop + persistence + lifecycle |
+| `native/Sources/SiberLights/Effects.swift`          | All 24 effects |
+| `native/Sources/SiberLights/AudioAnalyzer.swift`    | AVAudioEngine + vDSP FFT (music effects) |
+| `native/Sources/SiberLights/ContentView.swift`      | SwiftUI menu panel |
+| `native/Sources/SiberLights/SiberLightsApp.swift`   | MenuBarExtra entry point |
+| `native/build.sh`                                   | Build / bundle / install script |
+
+## Python reference implementation
 
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
-
-# run the menu bar app
-.venv/bin/python menubar_app.py
-
-# or the window app
-.venv/bin/python lights_app.py
+.venv/bin/python menubar_app.py     # menu bar app (rumps)
+.venv/bin/python lights_app.py      # window app (tkinter)
+.venv/bin/python setup.py py2app    # -> dist/SiberLights.app
 ```
-
-The CH340 serial driver is built into macOS 11+ — no extra kernel driver needed.
-
-## Building a standalone app
-
-```bash
-.venv/bin/python setup.py py2app
-# -> dist/SiberLights.app
-```
-
-Packaging as a real `.app` bundle (rather than running the interpreter directly) gives the
-app its own identity for microphone permission and menu bar registration.
-
-## Layout
 
 | File | Purpose |
 |------|---------|
 | `lights_core.py` | Serial streamer, effects engine, audio analyzer (no UI deps) |
-| `menubar_app.py` | Menu bar app (rumps) — primary UI |
-| `lights_app.py`  | Window app (tkinter) — alternative UI |
+| `menubar_app.py` | Menu bar app (rumps) |
+| `lights_app.py`  | Window app (tkinter) |
 | `setup.py`       | py2app build script |
 
 ## License

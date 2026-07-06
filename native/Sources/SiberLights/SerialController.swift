@@ -11,6 +11,8 @@ final class SerialController: ObservableObject {
 
     @Published var isConnected = false
     @Published var portName: String = ""
+    @Published var micSilent = false          // music effect active but no audio
+    @Published var userDisconnected = false   // manual disconnect suppresses auto-reconnect
 
     // control values (bound to the UI, persisted to UserDefaults)
     @Published var effect: String { didSet { sync(); save() } }
@@ -37,6 +39,8 @@ final class SerialController: ObservableObject {
     private var startTime = Date()
 
     private let defaults = UserDefaults.standard
+    private var pollTimer: DispatchSourceTimer?
+    private var noDeviceTicks = 0
 
     init() {
         effect = defaults.string(forKey: "effect") ?? "Solid"
@@ -50,6 +54,33 @@ final class SerialController: ObservableObject {
         sensitivity = defaults.object(forKey: "sensitivity") as? Double ?? 50
         sync()
         connect()
+        startPolling()
+    }
+
+    /// Matches the Python app's lifecycle: auto-reconnect when the strip
+    /// reappears, and auto-quit ~6s after it's unplugged (the LaunchAgent
+    /// relaunches us on the next USB attach). Also refreshes the mic-silent
+    /// indicator.
+    private func startPolling() {
+        let t = DispatchSource.makeTimerSource(queue: .main)
+        t.schedule(deadline: .now() + 2, repeating: 2)
+        t.setEventHandler { [weak self] in self?.poll() }
+        pollTimer = t
+        t.resume()
+    }
+
+    private func poll() {
+        micSilent = MUSIC_EFFECTS.contains(effect) && audio.isSilent()
+        if SerialController.findPort() != nil {
+            noDeviceTicks = 0
+            if !isConnected && !userDisconnected { connect() }
+        } else {
+            noDeviceTicks += 1
+            if noDeviceTicks >= 3 {   // ~6s grace, survives brief replug blips
+                shutdown()
+                NSApplication.shared.terminate(nil)
+            }
+        }
     }
 
     // MARK: - persistence

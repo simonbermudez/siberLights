@@ -85,8 +85,13 @@ struct ContentView: View {
 
             HStack {
                 Button(controller.isConnected ? "Disconnect" : "Connect") {
-                    if controller.isConnected { controller.disconnect() }
-                    else { controller.connect() }
+                    if controller.isConnected {
+                        controller.userDisconnected = true
+                        controller.disconnect()
+                    } else {
+                        controller.userDisconnected = false
+                        controller.connect()
+                    }
                 }
                 Spacer()
                 Button("Quit") {
