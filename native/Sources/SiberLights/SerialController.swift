@@ -20,6 +20,7 @@ final class SerialController: ObservableObject {
     @Published var brightness: Double { didSet { sync(); save() } }   // 1...100
     @Published var speed: Double { didSet { sync(); save() } }        // 1...100
     @Published var sensitivity: Double { didSet { sync(); save() } }  // 1...100
+    @Published var followScreen: Bool { didSet { applyScreenState(); save() } }  // blank while display asleep
 
     private let audio = AudioAnalyzer()
 
@@ -28,9 +29,12 @@ final class SerialController: ObservableObject {
         var color = RGB(r: 255, g: 96, b: 0)
         var brightness = 1.0
         var speed = 1.0
+        var blank = false   // display asleep + followScreen: hold the strip dark
     }
     private var snap = Snapshot()
     private let lock = NSLock()
+    private var screenAsleep = false          // driven by NSWorkspace notifications
+    private var screenObservers: [NSObjectProtocol] = []
 
     private let queue = DispatchQueue(label: "com.siber.siberlights.serial")
     private var fd: Int32 = -1
@@ -52,9 +56,34 @@ final class SerialController: ObservableObject {
         brightness = defaults.object(forKey: "brightness") as? Double ?? 100
         speed = defaults.object(forKey: "speed") as? Double ?? 50
         sensitivity = defaults.object(forKey: "sensitivity") as? Double ?? 50
+        followScreen = defaults.object(forKey: "followScreen") as? Bool ?? false
         sync()
         connect()
         startPolling()
+        registerScreenObservers()
+    }
+
+    deinit {
+        let nc = NSWorkspace.shared.notificationCenter
+        screenObservers.forEach { nc.removeObserver($0) }
+    }
+
+    // MARK: - display sleep/wake
+    /// When `followScreen` is on, mirror the display: blank the strip while the
+    /// monitor sleeps and restore the effect on wake. The serial connection and
+    /// render loop stay alive throughout — we just hold dark frames.
+    private func registerScreenObservers() {
+        let nc = NSWorkspace.shared.notificationCenter
+        screenObservers.append(nc.addObserver(
+            forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main
+        ) { [weak self] _ in self?.screenAsleep = true; self?.applyScreenState() })
+        screenObservers.append(nc.addObserver(
+            forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in self?.screenAsleep = false; self?.applyScreenState() })
+    }
+
+    private func applyScreenState() {
+        lock.lock(); snap.blank = followScreen && screenAsleep; lock.unlock()
     }
 
     /// Matches the Python app's lifecycle: auto-reconnect when the strip
@@ -93,6 +122,7 @@ final class SerialController: ObservableObject {
         defaults.set(brightness, forKey: "brightness")
         defaults.set(speed, forKey: "speed")
         defaults.set(sensitivity, forKey: "sensitivity")
+        defaults.set(followScreen, forKey: "followScreen")
     }
 
     /// copy control values into the lock-protected snapshot for the render loop
@@ -100,7 +130,8 @@ final class SerialController: ObservableObject {
         lock.lock()
         snap = Snapshot(effect: effect, color: color,
                         brightness: brightness / 100.0,
-                        speed: speed / 12.5)   // 1...100 -> 0.08...8
+                        speed: speed / 12.5,   // 1...100 -> 0.08...8
+                        blank: followScreen && screenAsleep)
         lock.unlock()
         audio.gain = sensitivity / 50.0
         updateAudio()
@@ -190,6 +221,12 @@ final class SerialController: ObservableObject {
     private func tick() {
         guard fd >= 0 else { return }
         lock.lock(); let s = snap; lock.unlock()
+        if s.blank {
+            let off = [UInt8]([0x41, 0x64, 0x61, 0, 0, UInt8(LED_COUNT)]
+                              + [UInt8](repeating: 0, count: 3 * LED_COUNT))
+            writeAll(off)
+            return
+        }
         let elapsed = Date().timeIntervalSince(startTime)
         let px: [RGB]
         if MUSIC_EFFECTS.contains(s.effect) {
