@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Virtual environment
+.venv/
+
+# py2app build output
+build/
+dist/
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# macOS
+.DS_Store

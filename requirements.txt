@@ -1,0 +1,5 @@
+pyserial
+sounddevice
+numpy
+rumps
+py2app
