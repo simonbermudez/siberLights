@@ -33,6 +33,11 @@ struct ContentView: View {
                         .font(.caption).foregroundStyle(.orange)
                         .help("Screen Sync needs Screen Recording permission — System Settings > Privacy & Security > Screen & System Audio Recording")
                 }
+                if controller.notificationNoPermission {
+                    Image(systemName: "bell.slash")
+                        .font(.caption).foregroundStyle(.orange)
+                        .help("React to notifications needs Accessibility permission — System Settings > Privacy & Security > Accessibility")
+                }
                 Circle()
                     .fill(controller.isConnected ? Color.green : Color.secondary)
                     .frame(width: 8, height: 8)
@@ -106,6 +111,32 @@ struct ContentView: View {
             .toggleStyle(.switch)
             .controlSize(.mini)
             .help("Blank the strip while the display sleeps, restore it on wake")
+
+            Toggle(isOn: $controller.reactToNotifications) {
+                Text("React to notifications")
+                    .font(.caption)
+            }
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .help("Flash a scene on the strip for 3 seconds whenever a notification banner appears")
+
+            if controller.reactToNotifications {
+                HStack(spacing: 6) {
+                    Picker("Scene", selection: $controller.notificationScene) {
+                        ForEach(STATIC_EFFECTS.filter { $0 != "Off" }, id: \.self) {
+                            Text($0).tag($0)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    ColorPicker("", selection: Binding(
+                        get: { controller.notificationSwiftUIColor },
+                        set: { controller.notificationSwiftUIColor = $0 }))
+                        .labelsHidden()
+                    Button("Test") { controller.flashNotification() }
+                        .controlSize(.small)
+                }
+                .font(.caption)
+            }
 
             Divider()
 

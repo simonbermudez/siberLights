@@ -21,18 +21,30 @@ final class SerialController: ObservableObject {
     @Published var brightness: Double { didSet { sync(); save() } }   // 1...100
     @Published var speed: Double { didSet { sync(); save() } }        // 1...100
     @Published var sensitivity: Double { didSet { sync(); save() } }  // 1...100
-    @Published var followScreen: Bool { didSet { updateOverride(); save() } }  // gate: lights off while display asleep
+    @Published var followScreen: Bool { didSet { sync(); save() } }  // gate: lights off while display asleep
     @Published var screenReversed: Bool { didSet { screen.reversed = screenReversed; save() } }
+    @Published var reactToNotifications: Bool { didSet { updateNotifWatcher(); save() } }
+    @Published var notificationScene: String { didSet { sync(); save() } }
+    @Published var notificationColor: RGB { didSet { sync(); save() } }
+    @Published var notificationNoPermission = false // toggle on but no Accessibility grant
 
     private let audio = AudioAnalyzer()
     private let screen = ScreenSampler()
+    private let notifWatcher = NotificationWatcher()
+    private var notifFlashActive = false
+    private var notifFlashOff: DispatchWorkItem?
 
-    // system-state override: display sleep forces Off, screensaver forces
-    // Screen Sync; the user's saved selection is untouched and resumes after
+    // system-state overrides: display sleep forces Off, a notification flashes
+    // the chosen scene, screensaver forces Screen Sync; the user's saved
+    // selection is untouched and resumes once they clear
     private var screensaverActive = false
     private var screensAsleep = false
-    private var effectOverride: String?
-    private var activeEffect: String { effectOverride ?? effect }
+    private var activeEffect: String {
+        if screensAsleep && followScreen { return "Off" }
+        if notifFlashActive { return notificationScene }
+        if screensaverActive { return "Screen Sync" }
+        return effect
+    }
 
     private struct Snapshot {
         var effect = "Solid"
@@ -65,11 +77,47 @@ final class SerialController: ObservableObject {
         sensitivity = defaults.object(forKey: "sensitivity") as? Double ?? 50
         followScreen = defaults.object(forKey: "followScreen") as? Bool ?? true
         screenReversed = defaults.bool(forKey: "screenReversed")
+        reactToNotifications = defaults.bool(forKey: "reactToNotifications")
+        notificationScene = defaults.string(forKey: "notificationScene") ?? "Strobe"
+        if let c = defaults.array(forKey: "notificationColor") as? [Int], c.count == 3 {
+            notificationColor = RGB(r: UInt8(c[0]), g: UInt8(c[1]), b: UInt8(c[2]))
+        } else {
+            notificationColor = RGB(r: 255, g: 255, b: 255)
+        }
         screen.reversed = screenReversed
+        notifWatcher.onNotification = { [weak self] in self?.flashNotification() }
+        updateNotifWatcher()
         sync()
         connect()
         startPolling()
         startSystemObservers()
+    }
+
+    // MARK: - notification reaction
+    private func updateNotifWatcher() {
+        if reactToNotifications {
+            notifWatcher.start()
+        } else {
+            notifWatcher.stop()
+            notifFlashOff?.cancel()
+            notifFlashActive = false
+            sync()
+        }
+        notificationNoPermission = reactToNotifications && notifWatcher.noPermission
+    }
+
+    /// flash the chosen scene for 3 seconds; a fresh notification extends it
+    func flashNotification() {
+        guard reactToNotifications else { return }
+        notifFlashOff?.cancel()
+        notifFlashActive = true
+        sync()
+        let off = DispatchWorkItem { [weak self] in
+            self?.notifFlashActive = false
+            self?.sync()
+        }
+        notifFlashOff = off
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: off)
     }
 
     /// Watch the screensaver and display power so the lights can follow:
@@ -98,21 +146,7 @@ final class SerialController: ObservableObject {
             case NSWorkspace.screensDidWakeNotification.rawValue: self.screensAsleep = false
             default: break
             }
-            self.updateOverride()
-        }
-    }
-
-    /// Recompute the system-state effect override. Display sleep forces the
-    /// lights Off — but only when the "Turn off with display" toggle is on;
-    /// otherwise a running screensaver switches to Screen Sync. The user's
-    /// saved effect is untouched and resumes once both clear.
-    private func updateOverride() {
-        // sleep wins over screensaver (the saver keeps "running" unseen)
-        let override: String? = (screensAsleep && followScreen) ? "Off"
-            : (screensaverActive ? "Screen Sync" : nil)
-        if override != effectOverride {
-            effectOverride = override
-            sync()
+            self.sync()
         }
     }
 
@@ -135,6 +169,9 @@ final class SerialController: ObservableObject {
         if silent != micSilent { micSilent = silent }
         let noPerm = SCREEN_EFFECTS.contains(activeEffect) && screen.noPermission
         if noPerm != screenNoPermission { screenNoPermission = noPerm }
+        notifWatcher.refresh()   // late grant / Notification Center restart
+        let notifPerm = reactToNotifications && notifWatcher.noPermission
+        if notifPerm != notificationNoPermission { notificationNoPermission = notifPerm }
         if SerialController.findPort() != nil {
             noDeviceTicks = 0
             if !isConnected && !userDisconnected { connect() }
@@ -156,12 +193,17 @@ final class SerialController: ObservableObject {
         defaults.set(sensitivity, forKey: "sensitivity")
         defaults.set(followScreen, forKey: "followScreen")
         defaults.set(screenReversed, forKey: "screenReversed")
+        defaults.set(reactToNotifications, forKey: "reactToNotifications")
+        defaults.set(notificationScene, forKey: "notificationScene")
+        defaults.set([Int(notificationColor.r), Int(notificationColor.g), Int(notificationColor.b)],
+                     forKey: "notificationColor")
     }
 
     /// copy control values into the lock-protected snapshot for the render loop
     private func sync() {
         lock.lock()
-        snap = Snapshot(effect: activeEffect, color: color,
+        snap = Snapshot(effect: activeEffect,
+                        color: notifFlashActive ? notificationColor : color,
                         brightness: brightness / 100.0,
                         speed: speed / 12.5)   // 1...100 -> 0.08...8
         lock.unlock()
@@ -240,6 +282,7 @@ final class SerialController: ObservableObject {
     func shutdown() {
         audio.stop()
         screen.stop()
+        notifWatcher.stop()
         disconnect()
     }
 
@@ -295,14 +338,25 @@ final class SerialController: ObservableObject {
         }
     }
 
-    // color bridge for SwiftUI ColorPicker
+    // color bridges for SwiftUI ColorPicker
     var swiftUIColor: Color {
-        get { Color(red: Double(color.r) / 255, green: Double(color.g) / 255, blue: Double(color.b) / 255) }
-        set {
-            let ns = NSColor(newValue).usingColorSpace(.sRGB) ?? .white
-            color = RGB(r: UInt8(max(0, min(255, ns.redComponent * 255))),
-                        g: UInt8(max(0, min(255, ns.greenComponent * 255))),
-                        b: UInt8(max(0, min(255, ns.blueComponent * 255))))
-        }
+        get { SerialController.toColor(color) }
+        set { color = SerialController.toRGB(newValue) }
+    }
+
+    var notificationSwiftUIColor: Color {
+        get { SerialController.toColor(notificationColor) }
+        set { notificationColor = SerialController.toRGB(newValue) }
+    }
+
+    private static func toColor(_ c: RGB) -> Color {
+        Color(red: Double(c.r) / 255, green: Double(c.g) / 255, blue: Double(c.b) / 255)
+    }
+
+    private static func toRGB(_ c: Color) -> RGB {
+        let ns = NSColor(c).usingColorSpace(.sRGB) ?? .white
+        return RGB(r: UInt8(max(0, min(255, ns.redComponent * 255))),
+                   g: UInt8(max(0, min(255, ns.greenComponent * 255))),
+                   b: UInt8(max(0, min(255, ns.blueComponent * 255))))
     }
 }
