@@ -13,6 +13,11 @@ final class ScreenSampler: NSObject, SCStreamOutput, SCStreamDelegate {
     private let stripFraction = 0.12
     /// per-frame exponential smoothing (higher = snappier, lower = calmer)
     private let alpha = 0.45
+    /// saturation boost on the averaged color; averaging pulls toward gray
+    private let saturation = 1.6
+    /// screen pixels are sRGB-encoded but the LEDs are linear; without this
+    /// the strip lifts every midtone and looks washed out
+    private let gamma = 2.2
 
     var reversed = false                  // flip if the strip runs right-to-left
     private(set) var noPermission = false // Screen Recording TCC not granted
@@ -220,11 +225,21 @@ final class ScreenSampler: NSObject, SCStreamOutput, SCStreamDelegate {
             for c in 0..<3 {
                 smooth[gi * 3 + c] += (avg[led * 3 + c] - smooth[gi * 3 + c]) * alpha
             }
-            colors[gi] = RGB(r: UInt8(max(0, min(255, smooth[gi * 3]))),
-                             g: UInt8(max(0, min(255, smooth[gi * 3 + 1]))),
-                             b: UInt8(max(0, min(255, smooth[gi * 3 + 2]))))
+            colors[gi] = corrected(r: smooth[gi * 3], g: smooth[gi * 3 + 1],
+                                   b: smooth[gi * 3 + 2])
         }
         lock.unlock()
+    }
+
+    /// Re-saturate around luma (grays stay gray, mixed colors get their hue
+    /// back), then gamma-encode 0-255 sRGB for the linear LEDs.
+    private func corrected(r: Double, g: Double, b: Double) -> RGB {
+        let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b
+        func channel(_ v: Double) -> UInt8 {
+            let sat = max(0, min(255, luma + (v - luma) * saturation))
+            return UInt8(pow(sat / 255, gamma) * 255 + 0.5)
+        }
+        return RGB(r: channel(r), g: channel(g), b: channel(b))
     }
 
     // MARK: - readout (render loop)
