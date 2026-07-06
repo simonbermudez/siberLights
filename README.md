@@ -74,8 +74,8 @@ s.write(b"Ada\x00\x00" + bytes([65]) + bytes([255, 0, 0]) * 65)  # all red
 | `native/Sources/SiberLights/SerialController.swift` | Serial port + 30fps render loop + persistence + lifecycle |
 | `native/Sources/SiberLights/Effects.swift`          | All 32 effects |
 | `native/Sources/SiberLights/AudioAnalyzer.swift`    | `AVAudioEngine` + `vDSP` FFT (music effects) |
-| `native/Sources/SiberLights/ContentView.swift`      | SwiftUI menu panel |
-| `native/Sources/SiberLights/SiberLightsApp.swift`   | `MenuBarExtra` entry point |
+| `native/Sources/SiberLights/ContentView.swift`      | SwiftUI panel (hosted in an `NSPopover`) |
+| `native/Sources/SiberLights/main.swift`             | Entry point — `NSStatusItem` menu bar item |
 | `native/build.sh`                                   | Build / bundle / install script |
 
 ## License
