@@ -13,6 +13,7 @@ final class SerialController: ObservableObject {
     @Published var portName: String = ""
     @Published var micSilent = false          // music effect active but no audio
     @Published var userDisconnected = false   // manual disconnect suppresses auto-reconnect
+    @Published var screenNoPermission = false // screen effect active but no TCC grant
 
     // control values (bound to the UI, persisted to UserDefaults)
     @Published var effect: String { didSet { sync(); save() } }
@@ -20,21 +21,27 @@ final class SerialController: ObservableObject {
     @Published var brightness: Double { didSet { sync(); save() } }   // 1...100
     @Published var speed: Double { didSet { sync(); save() } }        // 1...100
     @Published var sensitivity: Double { didSet { sync(); save() } }  // 1...100
-    @Published var followScreen: Bool { didSet { applyScreenState(); save() } }  // blank while display asleep
+    @Published var followScreen: Bool { didSet { updateOverride(); save() } }  // gate: lights off while display asleep
+    @Published var screenReversed: Bool { didSet { screen.reversed = screenReversed; save() } }
 
     private let audio = AudioAnalyzer()
+    private let screen = ScreenSampler()
+
+    // system-state override: display sleep forces Off, screensaver forces
+    // Screen Sync; the user's saved selection is untouched and resumes after
+    private var screensaverActive = false
+    private var screensAsleep = false
+    private var effectOverride: String?
+    private var activeEffect: String { effectOverride ?? effect }
 
     private struct Snapshot {
         var effect = "Solid"
         var color = RGB(r: 255, g: 96, b: 0)
         var brightness = 1.0
         var speed = 1.0
-        var blank = false   // display asleep + followScreen: hold the strip dark
     }
     private var snap = Snapshot()
     private let lock = NSLock()
-    private var screenAsleep = false          // driven by NSWorkspace notifications
-    private var screenObservers: [NSObjectProtocol] = []
 
     private let queue = DispatchQueue(label: "com.siber.siberlights.serial")
     private var fd: Int32 = -1
@@ -56,34 +63,57 @@ final class SerialController: ObservableObject {
         brightness = defaults.object(forKey: "brightness") as? Double ?? 100
         speed = defaults.object(forKey: "speed") as? Double ?? 50
         sensitivity = defaults.object(forKey: "sensitivity") as? Double ?? 50
-        followScreen = defaults.object(forKey: "followScreen") as? Bool ?? false
+        followScreen = defaults.object(forKey: "followScreen") as? Bool ?? true
+        screenReversed = defaults.bool(forKey: "screenReversed")
+        screen.reversed = screenReversed
         sync()
         connect()
         startPolling()
-        registerScreenObservers()
+        startSystemObservers()
     }
 
-    deinit {
-        let nc = NSWorkspace.shared.notificationCenter
-        screenObservers.forEach { nc.removeObserver($0) }
+    /// Watch the screensaver and display power so the lights can follow:
+    /// screensaver showing -> Screen Sync, screens off -> lights off.
+    private func startSystemObservers() {
+        let dnc = DistributedNotificationCenter.default()
+        dnc.addObserver(self, selector: #selector(systemStateChanged(_:)),
+                        name: .init("com.apple.screensaver.didstart"), object: nil)
+        dnc.addObserver(self, selector: #selector(systemStateChanged(_:)),
+                        name: .init("com.apple.screensaver.didstop"), object: nil)
+        let wnc = NSWorkspace.shared.notificationCenter
+        wnc.addObserver(self, selector: #selector(systemStateChanged(_:)),
+                        name: NSWorkspace.screensDidSleepNotification, object: nil)
+        wnc.addObserver(self, selector: #selector(systemStateChanged(_:)),
+                        name: NSWorkspace.screensDidWakeNotification, object: nil)
     }
 
-    // MARK: - display sleep/wake
-    /// When `followScreen` is on, mirror the display: blank the strip while the
-    /// monitor sleeps and restore the effect on wake. The serial connection and
-    /// render loop stay alive throughout — we just hold dark frames.
-    private func registerScreenObservers() {
-        let nc = NSWorkspace.shared.notificationCenter
-        screenObservers.append(nc.addObserver(
-            forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main
-        ) { [weak self] _ in self?.screenAsleep = true; self?.applyScreenState() })
-        screenObservers.append(nc.addObserver(
-            forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main
-        ) { [weak self] _ in self?.screenAsleep = false; self?.applyScreenState() })
+    @objc private func systemStateChanged(_ note: Notification) {
+        let name = note.name
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            switch name.rawValue {
+            case "com.apple.screensaver.didstart": self.screensaverActive = true
+            case "com.apple.screensaver.didstop": self.screensaverActive = false
+            case NSWorkspace.screensDidSleepNotification.rawValue: self.screensAsleep = true
+            case NSWorkspace.screensDidWakeNotification.rawValue: self.screensAsleep = false
+            default: break
+            }
+            self.updateOverride()
+        }
     }
 
-    private func applyScreenState() {
-        lock.lock(); snap.blank = followScreen && screenAsleep; lock.unlock()
+    /// Recompute the system-state effect override. Display sleep forces the
+    /// lights Off — but only when the "Turn off with display" toggle is on;
+    /// otherwise a running screensaver switches to Screen Sync. The user's
+    /// saved effect is untouched and resumes once both clear.
+    private func updateOverride() {
+        // sleep wins over screensaver (the saver keeps "running" unseen)
+        let override: String? = (screensAsleep && followScreen) ? "Off"
+            : (screensaverActive ? "Screen Sync" : nil)
+        if override != effectOverride {
+            effectOverride = override
+            sync()
+        }
     }
 
     /// Matches the Python app's lifecycle: auto-reconnect when the strip
@@ -101,8 +131,10 @@ final class SerialController: ObservableObject {
     private func poll() {
         // only republish on real change — a periodic @Published write would
         // needlessly invalidate observers every 2s
-        let silent = MUSIC_EFFECTS.contains(effect) && audio.isSilent()
+        let silent = MUSIC_EFFECTS.contains(activeEffect) && audio.isSilent()
         if silent != micSilent { micSilent = silent }
+        let noPerm = SCREEN_EFFECTS.contains(activeEffect) && screen.noPermission
+        if noPerm != screenNoPermission { screenNoPermission = noPerm }
         if SerialController.findPort() != nil {
             noDeviceTicks = 0
             if !isConnected && !userDisconnected { connect() }
@@ -123,23 +155,24 @@ final class SerialController: ObservableObject {
         defaults.set(speed, forKey: "speed")
         defaults.set(sensitivity, forKey: "sensitivity")
         defaults.set(followScreen, forKey: "followScreen")
+        defaults.set(screenReversed, forKey: "screenReversed")
     }
 
     /// copy control values into the lock-protected snapshot for the render loop
     private func sync() {
         lock.lock()
-        snap = Snapshot(effect: effect, color: color,
+        snap = Snapshot(effect: activeEffect, color: color,
                         brightness: brightness / 100.0,
-                        speed: speed / 12.5,   // 1...100 -> 0.08...8
-                        blank: followScreen && screenAsleep)
+                        speed: speed / 12.5)   // 1...100 -> 0.08...8
         lock.unlock()
         audio.gain = sensitivity / 50.0
-        updateAudio()
+        updateSources()
     }
 
-    /// open the mic only while a music effect is selected (privacy).
-    private func updateAudio() {
-        if MUSIC_EFFECTS.contains(effect) { audio.start() } else { audio.stop() }
+    /// open the mic / screen capture only while an effect needs it (privacy).
+    private func updateSources() {
+        if MUSIC_EFFECTS.contains(activeEffect) { audio.start() } else { audio.stop() }
+        if SCREEN_EFFECTS.contains(activeEffect) { screen.start() } else { screen.stop() }
     }
 
     // MARK: - port discovery
@@ -206,6 +239,7 @@ final class SerialController: ObservableObject {
     /// stop everything for app termination
     func shutdown() {
         audio.stop()
+        screen.stop()
         disconnect()
     }
 
@@ -221,15 +255,11 @@ final class SerialController: ObservableObject {
     private func tick() {
         guard fd >= 0 else { return }
         lock.lock(); let s = snap; lock.unlock()
-        if s.blank {
-            let off = [UInt8]([0x41, 0x64, 0x61, 0, 0, UInt8(LED_COUNT)]
-                              + [UInt8](repeating: 0, count: 3 * LED_COUNT))
-            writeAll(off)
-            return
-        }
         let elapsed = Date().timeIntervalSince(startTime)
         let px: [RGB]
-        if MUSIC_EFFECTS.contains(s.effect) {
+        if SCREEN_EFFECTS.contains(s.effect) {
+            px = screen.snapshot()
+        } else if MUSIC_EFFECTS.contains(s.effect) {
             let (bands, level, beat) = audio.snapshot()
             px = engine.renderMusic(effect: s.effect, n: LED_COUNT, t: elapsed, color: s.color,
                                     speed: s.speed, bands: bands, level: level, beat: beat)

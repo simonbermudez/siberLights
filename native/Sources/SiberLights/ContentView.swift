@@ -28,6 +28,11 @@ struct ContentView: View {
                         .font(.caption).foregroundStyle(.orange)
                         .help("Music effect active but no audio detected")
                 }
+                if controller.screenNoPermission {
+                    Image(systemName: "rectangle.on.rectangle.slash")
+                        .font(.caption).foregroundStyle(.orange)
+                        .help("Screen Sync needs Screen Recording permission — System Settings > Privacy & Security > Screen & System Audio Recording")
+                }
                 Circle()
                     .fill(controller.isConnected ? Color.green : Color.secondary)
                     .frame(width: 8, height: 8)
@@ -45,8 +50,16 @@ struct ContentView: View {
                 Section("Music") {
                     ForEach(MUSIC_EFFECTS, id: \.self) { Text($0).tag($0) }
                 }
+                Section("Screen") {
+                    ForEach(SCREEN_EFFECTS, id: \.self) { Text($0).tag($0) }
+                }
             }
             .pickerStyle(.menu)
+
+            if SCREEN_EFFECTS.contains(controller.effect) {
+                Toggle("Reverse LED direction", isOn: $controller.screenReversed)
+                    .font(.caption)
+            }
 
             // color: presets + native color well
             HStack(spacing: 6) {
