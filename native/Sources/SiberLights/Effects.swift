@@ -21,6 +21,11 @@ let MUSIC_EFFECTS = [
     "Energy Comet", "Bass Pump", "Flow", "Meter Peak",
 ]
 
+/// rendered from live screen content (ScreenSampler), not the EffectEngine
+let SCREEN_EFFECTS = [
+    "Screen Sync",
+]
+
 /// hue/sat/value in 0...1 -> RGB bytes
 func hsv(_ h: Double, _ s: Double, _ v: Double) -> RGB {
     let i = Int(floor(h * 6))
