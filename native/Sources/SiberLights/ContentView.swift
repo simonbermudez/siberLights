@@ -38,6 +38,11 @@ struct ContentView: View {
                         .font(.caption).foregroundStyle(.orange)
                         .help("React to notifications needs Accessibility permission — System Settings > Privacy & Security > Accessibility")
                 }
+                if controller.appleMusicNoPermission {
+                    Image(systemName: "music.note.list")
+                        .font(.caption).foregroundStyle(.orange)
+                        .help("Auto music effect needs permission to automate Music — System Settings > Privacy & Security > Automation")
+                }
                 Circle()
                     .fill(controller.isConnected ? Color.green : Color.secondary)
                     .frame(width: 8, height: 8)
@@ -104,6 +109,16 @@ struct ContentView: View {
                     .disabled(!isMusic)
             }
 
+            Toggle(isOn: $controller.colorfulBeat) {
+                Text("Colorful (change color on beat)")
+                    .font(.caption)
+                    .foregroundStyle(MUSIC_EFFECTS.contains(controller.effect) ? .primary : Color.secondary.opacity(0.4))
+            }
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .disabled(!MUSIC_EFFECTS.contains(controller.effect))
+            .help("Cycle to a new color every beat instead of using the fixed color")
+
             Toggle(isOn: $controller.followScreen) {
                 Text("Turn off with display")
                     .font(.caption)
@@ -119,6 +134,14 @@ struct ContentView: View {
             .toggleStyle(.switch)
             .controlSize(.mini)
             .help("Flash a scene on the strip for 3 seconds whenever a notification banner appears")
+
+            Toggle(isOn: $controller.reactToAppleMusic) {
+                Text("Auto music effect for Apple Music")
+                    .font(.caption)
+            }
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .help("Switch to the last-picked music effect whenever Apple Music is playing, and back when it stops")
 
             if controller.reactToNotifications {
                 HStack(spacing: 6) {

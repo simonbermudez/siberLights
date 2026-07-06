@@ -39,6 +39,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>siberLights uses the audio input to sync the LED strip with music.</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>siberLights checks whether Music is playing to switch on a music effect automatically.</string>
 </dict>
 </plist>
 PLIST

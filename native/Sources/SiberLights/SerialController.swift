@@ -16,33 +16,46 @@ final class SerialController: ObservableObject {
     @Published var screenNoPermission = false // screen effect active but no TCC grant
 
     // control values (bound to the UI, persisted to UserDefaults)
-    @Published var effect: String { didSet { sync(); save() } }
+    @Published var effect: String {
+        didSet {
+            if MUSIC_EFFECTS.contains(effect) { lastMusicEffect = effect }
+            sync(); save()
+        }
+    }
     @Published var color: RGB { didSet { sync(); save() } }
     @Published var brightness: Double { didSet { sync(); save() } }   // 1...100
     @Published var speed: Double { didSet { sync(); save() } }        // 1...100
     @Published var sensitivity: Double { didSet { sync(); save() } }  // 1...100
     @Published var followScreen: Bool { didSet { sync(); save() } }  // gate: lights off while display asleep
     @Published var screenReversed: Bool { didSet { screen.reversed = screenReversed; save() } }
+    @Published var colorfulBeat: Bool { didSet { save() } }  // music effects: cycle color on every beat
     @Published var reactToNotifications: Bool { didSet { updateNotifWatcher(); save() } }
     @Published var notificationScene: String { didSet { sync(); save() } }
     @Published var notificationColor: RGB { didSet { sync(); save() } }
     @Published var notificationNoPermission = false // toggle on but no Accessibility grant
+    @Published var reactToAppleMusic: Bool { didSet { updateAppleMusicWatcher(); save() } }
+    @Published var appleMusicNoPermission = false // toggle on but no Automation grant for Music.app
 
     private let audio = AudioAnalyzer()
     private let screen = ScreenSampler()
     private let notifWatcher = NotificationWatcher()
+    private let appleMusicWatcher = AppleMusicWatcher()
     private var notifFlashActive = false
     private var notifFlashOff: DispatchWorkItem?
+    private var appleMusicPlaying = false
+    private var lastMusicEffect = "Spectrum"
 
     // system-state overrides: display sleep forces Off, a notification flashes
-    // the chosen scene, screensaver forces Screen Sync; the user's saved
-    // selection is untouched and resumes once they clear
+    // the chosen scene, screensaver forces Screen Sync, Apple Music playing
+    // switches to the last-picked music effect; the user's saved selection is
+    // untouched and resumes once they clear
     private var screensaverActive = false
     private var screensAsleep = false
     private var activeEffect: String {
         if screensAsleep && followScreen { return "Off" }
         if notifFlashActive { return notificationScene }
         if screensaverActive { return "Screen Sync" }
+        if reactToAppleMusic && appleMusicPlaying && !MUSIC_EFFECTS.contains(effect) { return lastMusicEffect }
         return effect
     }
 
@@ -60,6 +73,8 @@ final class SerialController: ObservableObject {
     private var timer: DispatchSourceTimer?
     private let engine = EffectEngine()
     private var startTime = Date()
+    private var colorfulHue = 0.0
+    private var colorfulBeatPrev = false
 
     private let defaults = UserDefaults.standard
     private var pollTimer: DispatchSourceTimer?
@@ -67,6 +82,7 @@ final class SerialController: ObservableObject {
 
     init() {
         effect = defaults.string(forKey: "effect") ?? "Solid"
+        lastMusicEffect = defaults.string(forKey: "lastMusicEffect") ?? "Spectrum"
         if let c = defaults.array(forKey: "color") as? [Int], c.count == 3 {
             color = RGB(r: UInt8(c[0]), g: UInt8(c[1]), b: UInt8(c[2]))
         } else {
@@ -77,6 +93,7 @@ final class SerialController: ObservableObject {
         sensitivity = defaults.object(forKey: "sensitivity") as? Double ?? 50
         followScreen = defaults.object(forKey: "followScreen") as? Bool ?? true
         screenReversed = defaults.bool(forKey: "screenReversed")
+        colorfulBeat = defaults.bool(forKey: "colorfulBeat")
         reactToNotifications = defaults.bool(forKey: "reactToNotifications")
         notificationScene = defaults.string(forKey: "notificationScene") ?? "Strobe"
         if let c = defaults.array(forKey: "notificationColor") as? [Int], c.count == 3 {
@@ -84,13 +101,28 @@ final class SerialController: ObservableObject {
         } else {
             notificationColor = RGB(r: 255, g: 255, b: 255)
         }
+        reactToAppleMusic = defaults.bool(forKey: "reactToAppleMusic")
         screen.reversed = screenReversed
         notifWatcher.onNotification = { [weak self] in self?.flashNotification() }
         updateNotifWatcher()
+        updateAppleMusicWatcher()
         sync()
         connect()
         startPolling()
         startSystemObservers()
+    }
+
+    // MARK: - Apple Music reaction
+    private func updateAppleMusicWatcher() {
+        if reactToAppleMusic {
+            appleMusicWatcher.refresh()
+            appleMusicPlaying = appleMusicWatcher.isPlaying
+            appleMusicNoPermission = appleMusicWatcher.noPermission
+        } else {
+            appleMusicPlaying = false
+            appleMusicNoPermission = false
+        }
+        sync()
     }
 
     // MARK: - notification reaction
@@ -172,6 +204,13 @@ final class SerialController: ObservableObject {
         notifWatcher.refresh()   // late grant / Notification Center restart
         let notifPerm = reactToNotifications && notifWatcher.noPermission
         if notifPerm != notificationNoPermission { notificationNoPermission = notifPerm }
+        if reactToAppleMusic {
+            appleMusicWatcher.refresh()
+            let playing = appleMusicWatcher.isPlaying
+            if playing != appleMusicPlaying { appleMusicPlaying = playing; sync() }
+            let musicPerm = appleMusicWatcher.noPermission
+            if musicPerm != appleMusicNoPermission { appleMusicNoPermission = musicPerm }
+        }
         if SerialController.findPort() != nil {
             noDeviceTicks = 0
             if !isConnected && !userDisconnected { connect() }
@@ -187,16 +226,19 @@ final class SerialController: ObservableObject {
     // MARK: - persistence
     private func save() {
         defaults.set(effect, forKey: "effect")
+        defaults.set(lastMusicEffect, forKey: "lastMusicEffect")
         defaults.set([Int(color.r), Int(color.g), Int(color.b)], forKey: "color")
         defaults.set(brightness, forKey: "brightness")
         defaults.set(speed, forKey: "speed")
         defaults.set(sensitivity, forKey: "sensitivity")
         defaults.set(followScreen, forKey: "followScreen")
         defaults.set(screenReversed, forKey: "screenReversed")
+        defaults.set(colorfulBeat, forKey: "colorfulBeat")
         defaults.set(reactToNotifications, forKey: "reactToNotifications")
         defaults.set(notificationScene, forKey: "notificationScene")
         defaults.set([Int(notificationColor.r), Int(notificationColor.g), Int(notificationColor.b)],
                      forKey: "notificationColor")
+        defaults.set(reactToAppleMusic, forKey: "reactToAppleMusic")
     }
 
     /// copy control values into the lock-protected snapshot for the render loop
@@ -304,7 +346,15 @@ final class SerialController: ObservableObject {
             px = screen.snapshot()
         } else if MUSIC_EFFECTS.contains(s.effect) {
             let (bands, level, beat) = audio.snapshot()
-            px = engine.renderMusic(effect: s.effect, n: LED_COUNT, t: elapsed, color: s.color,
+            var effectColor = s.color
+            if colorfulBeat {
+                if beat && !colorfulBeatPrev {
+                    colorfulHue = (colorfulHue + 0.15).truncatingRemainder(dividingBy: 1.0)
+                }
+                effectColor = hsv(colorfulHue, 1, 1)
+            }
+            colorfulBeatPrev = beat
+            px = engine.renderMusic(effect: s.effect, n: LED_COUNT, t: elapsed, color: effectColor,
                                     speed: s.speed, bands: bands, level: level, beat: beat)
         } else {
             px = engine.render(effect: s.effect, n: LED_COUNT, t: elapsed,
