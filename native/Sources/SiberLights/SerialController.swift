@@ -14,6 +14,7 @@ final class SerialController: ObservableObject {
     @Published var micSilent = false          // music effect active but no audio
     @Published var userDisconnected = false   // manual disconnect suppresses auto-reconnect
     @Published var screenNoPermission = false // screen effect active but no TCC grant
+    @Published var deviceMissing = false      // no strip found for ~6s: menu bar icon hides
 
     // control values (bound to the UI, persisted to UserDefaults)
     @Published var effect: String {
@@ -182,9 +183,11 @@ final class SerialController: ObservableObject {
         }
     }
 
-    /// Matches the Python app's lifecycle: auto-reconnect when the strip
-    /// reappears, and auto-quit ~6s after it's unplugged (the LaunchAgent
-    /// relaunches us on the next USB attach). Also refreshes the mic-silent
+    /// Auto-reconnect when the strip reappears. When it's been gone for ~6s
+    /// (survives brief replug blips) the app stops trying to drive it and
+    /// signals AppDelegate to hide the menu bar icon, but keeps polling in
+    /// the background at the same 2s cadence so it can resume the moment the
+    /// strip comes back — no relaunch needed. Also refreshes the mic-silent
     /// indicator.
     private func startPolling() {
         let t = DispatchSource.makeTimerSource(queue: .main)
@@ -213,12 +216,17 @@ final class SerialController: ObservableObject {
         }
         if SerialController.findPort() != nil {
             noDeviceTicks = 0
+            if deviceMissing {
+                deviceMissing = false
+                updateSources()   // resume mic/screen capture for the active effect
+            }
             if !isConnected && !userDisconnected { connect() }
         } else {
             noDeviceTicks += 1
-            if noDeviceTicks >= 3 {   // ~6s grace, survives brief replug blips
-                shutdown()
-                NSApplication.shared.terminate(nil)
+            if noDeviceTicks == 3 && !deviceMissing {   // ~6s grace, survives brief replug blips
+                audio.stop()
+                screen.stop()
+                deviceMissing = true
             }
         }
     }

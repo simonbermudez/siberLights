@@ -31,8 +31,10 @@ it directly over serial, so no vendor app, no cloud, no telemetry.
   and a color picker.
 - **Persistent settings** — the last effect, color, and slider positions are restored on
   launch (stored in `UserDefaults`).
-- **Auto-launch on plug-in** via a LaunchAgent that watches for the CH340 USB device, and
-  **auto-quit ~6s after unplug** (with auto-reconnect on replug).
+- **Auto-launch on plug-in** via a LaunchAgent that watches for the CH340 USB device. On
+  unplug the app doesn't quit — after ~6s it hides the menu bar icon and idles in the
+  background (mic/screen capture stopped), then reappears and auto-reconnects as soon as
+  the strip is plugged back in.
 - **Automatic overrides** — while the screensaver is showing, the lights switch to Screen
   Sync (they follow the screensaver); while the displays are asleep, the lights turn off.
   The selected effect resumes when conditions return to normal.

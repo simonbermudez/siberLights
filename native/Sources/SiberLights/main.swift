@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 // Classic AppKit menu bar app: an NSStatusItem plus an NSPopover that hosts
@@ -10,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let controller = SerialController()
     private var statusItem: NSStatusItem!
     private let popover = NSPopover()
+    private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -28,6 +30,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // notification scene row) and the top of the panel gets clipped
         hosting.sizingOptions = .preferredContentSize
         popover.contentViewController = hosting
+
+        // strip unplugged for ~6s -> hide the icon; back -> show it again
+        controller.$deviceMissing
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] missing in self?.setMenuBarVisible(!missing) }
+            .store(in: &cancellables)
+    }
+
+    private func setMenuBarVisible(_ visible: Bool) {
+        if !visible, popover.isShown { popover.performClose(nil) }
+        statusItem.isVisible = visible
     }
 
     @objc private func togglePopover(_ sender: Any?) {
