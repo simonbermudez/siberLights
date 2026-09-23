@@ -11,10 +11,11 @@ final class SerialController: ObservableObject {
 
     @Published var isConnected = false
     @Published var portName: String = ""
-    @Published var micSilent = false          // music effect active but no audio
+    @Published var audioSilent = false        // music effect active but nothing playing
     @Published var userDisconnected = false   // manual disconnect suppresses auto-reconnect
     @Published var screenNoPermission = false // screen effect active but no TCC grant
     @Published var deviceMissing = false      // no strip found for ~6s: menu bar icon hides
+    @Published var audioNoPermission = false  // music effect active but no TCC grant
 
     // control values (bound to the UI, persisted to UserDefaults)
     @Published var effect: String {
@@ -187,7 +188,7 @@ final class SerialController: ObservableObject {
     /// (survives brief replug blips) the app stops trying to drive it and
     /// signals AppDelegate to hide the menu bar icon, but keeps polling in
     /// the background at the same 2s cadence so it can resume the moment the
-    /// strip comes back — no relaunch needed. Also refreshes the mic-silent
+    /// strip comes back — no relaunch needed. Also refreshes the audio-silent
     /// indicator.
     private func startPolling() {
         let t = DispatchSource.makeTimerSource(queue: .main)
@@ -200,8 +201,11 @@ final class SerialController: ObservableObject {
     private func poll() {
         // only republish on real change — a periodic @Published write would
         // needlessly invalidate observers every 2s
-        let silent = MUSIC_EFFECTS.contains(activeEffect) && audio.isSilent()
-        if silent != micSilent { micSilent = silent }
+        let musicActive = MUSIC_EFFECTS.contains(activeEffect)
+        let audioPerm = musicActive && audio.noPermission
+        if audioPerm != audioNoPermission { audioNoPermission = audioPerm }
+        let silent = musicActive && !audioPerm && audio.isSilent()
+        if silent != audioSilent { audioSilent = silent }
         let noPerm = SCREEN_EFFECTS.contains(activeEffect) && screen.noPermission
         if noPerm != screenNoPermission { screenNoPermission = noPerm }
         notifWatcher.refresh()   // late grant / Notification Center restart
@@ -261,7 +265,8 @@ final class SerialController: ObservableObject {
         updateSources()
     }
 
-    /// open the mic / screen capture only while an effect needs it (privacy).
+    /// open the system-audio tap / screen capture only while an effect needs
+    /// it (privacy).
     private func updateSources() {
         if MUSIC_EFFECTS.contains(activeEffect) { audio.start() } else { audio.stop() }
         if SCREEN_EFFECTS.contains(activeEffect) { screen.start() } else { screen.stop() }
