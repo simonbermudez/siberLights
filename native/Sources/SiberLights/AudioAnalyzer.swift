@@ -1,17 +1,28 @@
 import Accelerate
-import AVFoundation
+import AppKit
+import CoreMedia
 import Foundation
+import ScreenCaptureKit
 
-/// Captures the default audio input and exposes smoothed 24-band energies,
-/// an overall level, and a beat flag — the Swift/vDSP port of the Python
-/// NumPy analyzer. The engine runs only while a music effect is active.
-final class AudioAnalyzer {
+/// Taps the system audio *output* via ScreenCaptureKit — no microphone — and
+/// exposes smoothed 24-band energies, an overall level, and a beat flag, the
+/// Swift/vDSP port of the Python NumPy analyzer. The tap runs only while a
+/// music effect is active and shares the Screen Recording permission that the
+/// Screen Sync effect already uses, so no extra TCC grant is needed.
+final class AudioAnalyzer: NSObject, SCStreamOutput, SCStreamDelegate {
     static let nBands = 24
     private let blockSize = 2048
     private let log2n = vDSP_Length(11)   // 2048 = 2^11
+    private let sampleRate = 48000.0
 
-    private let engine = AVAudioEngine()
+    private(set) var noPermission = false // Screen Recording TCC not granted
+
+    // main-thread state
+    private var stream: SCStream?
     private var running = false
+    private var restartPending = false
+    private var didPrompt = false   // ask for the TCC grant at most once per launch
+    private let sampleQueue = DispatchQueue(label: "com.siber.siberlights.audiotap")
 
     // outputs (read under lock by the render loop)
     private let lock = NSLock()
@@ -20,79 +31,153 @@ final class AudioAnalyzer {
     private var beat = false
     var gain = 1.0   // sensitivity multiplier
 
-    // silence detection (TCC-denied mic delivers zeros, not an error)
+    // silence detection (nothing playing, or the tap quietly broken)
     private var startedAt = Date()
     private var lastSignal = Date()
 
-    // AGC + beat history
-    private var peak = 1e-6
-    private var bassHist = [Double]()
-
-    // FFT scratch
+    // FFT scratch + AGC + beat history (sample queue only)
     private let fftSetup: FFTSetup
     private var window: [Float]
     private var accum = [Float]()
     private var bandBins: [(Int, Int)] = []   // [lo, hi) bin index per band
-    private var currentRate = 44100.0
+    private var peak = 1e-6
+    private var bassHist = [Double]()
 
-    init() {
+    override init() {
         fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2))!
         window = [Float](repeating: 0, count: blockSize)
         vDSP_hann_window(&window, vDSP_Length(blockSize), Int32(vDSP_HANN_DENORM))
+        // band edges: 50 Hz .. 8 kHz, log-spaced (rate is fixed by the stream
+        // config, so the bins can be computed once)
+        let edges = (0...AudioAnalyzer.nBands).map { i -> Double in
+            50.0 * pow(8000.0 / 50.0, Double(i) / Double(AudioAnalyzer.nBands))
+        }
+        let block = blockSize
+        let binHz = sampleRate / Double(block)
+        bandBins = (0..<AudioAnalyzer.nBands).map { b in
+            let lo = Int((edges[b] / binHz).rounded(.down))
+            let hi = max(lo + 1, Int((edges[b + 1] / binHz).rounded(.down)))
+            return (min(lo, block / 2 - 1), min(hi, block / 2))
+        }
+        super.init()
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(displaysChanged),
+            name: NSApplication.didChangeScreenParametersNotification, object: nil)
     }
 
     deinit { vDSP_destroy_fftsetup(fftSetup) }
 
-    private func computeBands(rate: Double) {
-        let edges = (0...AudioAnalyzer.nBands).map { i -> Double in
-            50.0 * pow(8000.0 / 50.0, Double(i) / Double(AudioAnalyzer.nBands))
-        }
-        let binHz = rate / Double(blockSize)
-        bandBins = (0..<AudioAnalyzer.nBands).map { b in
-            let lo = Int((edges[b] / binHz).rounded(.down))
-            let hi = max(lo + 1, Int((edges[b + 1] / binHz).rounded(.down)))
-            return (min(lo, blockSize / 2 - 1), min(hi, blockSize / 2))
-        }
-        currentRate = rate
-    }
-
-    // MARK: - lifecycle
+    // MARK: - lifecycle (main thread)
     func start() {
         guard !running else { return }
-        AVCaptureDevice.requestAccess(for: .audio) { _ in }
-        let input = engine.inputNode
-        let fmt = input.outputFormat(forBus: 0)
-        computeBands(rate: fmt.sampleRate > 0 ? fmt.sampleRate : 44100)
-        accum.removeAll(keepingCapacity: true)
-        input.removeTap(onBus: 0)
-        input.installTap(onBus: 0, bufferSize: UInt32(blockSize), format: fmt) { [weak self] buf, _ in
-            self?.process(buf)
-        }
-        do {
-            try engine.start()
-            running = true
-            startedAt = Date(); lastSignal = Date()
-        } catch {
-            running = false
-        }
+        running = true
+        startedAt = Date(); lastSignal = Date()
+        sampleQueue.async { [weak self] in self?.accum.removeAll(keepingCapacity: true) }
+        attemptSetup()
     }
 
     func stop() {
         guard running else { return }
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
         running = false
+        teardown()
         lock.lock()
         bands = [Double](repeating: 0, count: AudioAnalyzer.nBands)
         level = 0; beat = false
         lock.unlock()
     }
 
-    // MARK: - analysis (runs on the realtime audio thread)
-    private func process(_ buffer: AVAudioPCMBuffer) {
-        guard let ch = buffer.floatChannelData else { return }
-        let count = Int(buffer.frameLength)
-        accum.append(contentsOf: UnsafeBufferPointer(start: ch[0], count: count))
+    private func teardown() {
+        stream?.stopCapture { _ in }
+        stream = nil
+    }
+
+    /// the tap is anchored to a display filter, so a display change can
+    /// invalidate the stream without an error callback
+    @objc private func displaysChanged() { scheduleRestart() }
+
+    func stream(_ stream: SCStream, didStopWithError error: Error) {
+        DispatchQueue.main.async { self.scheduleRestart() }
+    }
+
+    private func scheduleRestart() {
+        guard running, !restartPending else { return }
+        restartPending = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            guard let self else { return }
+            self.restartPending = false
+            guard self.running else { return }
+            self.teardown()
+            self.attemptSetup()
+        }
+    }
+
+    // MARK: - stream setup
+    /// Same TCC gate as ScreenSampler: system-audio capture sits behind the
+    /// Screen Recording grant, and an SCK content fetch without it re-triggers
+    /// the system dialog every time — so preflight silently, prompt at most
+    /// once per launch, and poll quietly until granted.
+    private func attemptSetup() {
+        guard running, stream == nil else { return }
+        guard CGPreflightScreenCaptureAccess() else {
+            noPermission = true
+            if !didPrompt {
+                didPrompt = true
+                CGRequestScreenCaptureAccess()
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+                self?.attemptSetup()
+            }
+            return
+        }
+        noPermission = false
+        SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) {
+            [weak self] content, _ in
+            DispatchQueue.main.async { self?.configure(content) }
+        }
+    }
+
+    private func configure(_ content: SCShareableContent?) {
+        guard running, stream == nil else { return }
+        guard let content, let display = content.displays.first else {
+            // fetch failed even though preflight passed — retry via the gate
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+                self?.attemptSetup()
+            }
+            return
+        }
+
+        // audio-only stream: SCK insists on a display filter, so keep the
+        // video side as small and slow as it allows and never attach a
+        // .screen output for it
+        let cfg = SCStreamConfiguration()
+        cfg.capturesAudio = true
+        cfg.excludesCurrentProcessAudio = true
+        cfg.sampleRate = Int(sampleRate)
+        cfg.channelCount = 1
+        cfg.width = 64
+        cfg.height = 64
+        cfg.minimumFrameInterval = CMTime(value: 1, timescale: 1)
+        cfg.queueDepth = 3
+        let filter = SCContentFilter(display: display, excludingWindows: [])
+        let s = SCStream(filter: filter, configuration: cfg, delegate: self)
+        do {
+            try s.addStreamOutput(self, type: .audio, sampleHandlerQueue: sampleQueue)
+        } catch { return }
+        stream = s
+        startedAt = Date(); lastSignal = Date()
+        s.startCapture { _ in }  // failures surface via didStopWithError
+    }
+
+    // MARK: - analysis (sample queue)
+    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
+                of outputType: SCStreamOutputType) {
+        guard outputType == .audio else { return }
+        try? sampleBuffer.withAudioBufferList { abl, _ in
+            guard let buf = abl.first, let data = buf.mData else { return }
+            let count = Int(buf.mDataByteSize) / MemoryLayout<Float>.size
+            let samples = data.assumingMemoryBound(to: Float.self)
+            accum.append(contentsOf: UnsafeBufferPointer(start: samples, count: count))
+        }
         while accum.count >= blockSize {
             var block = Array(accum[0..<blockSize])
             accum.removeFirst(blockSize)

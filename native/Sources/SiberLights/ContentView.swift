@@ -23,10 +23,15 @@ struct ContentView: View {
                     .foregroundStyle(controller.isConnected ? .yellow : .secondary)
                 Text("siberLights").font(.headline)
                 Spacer()
-                if controller.micSilent {
-                    Image(systemName: "mic.slash")
+                if controller.audioSilent {
+                    Image(systemName: "waveform.slash")
                         .font(.caption).foregroundStyle(.orange)
-                        .help("Music effect active but no audio detected")
+                        .help("Music effect active but no system audio playing")
+                }
+                if controller.audioNoPermission {
+                    Image(systemName: "speaker.slash")
+                        .font(.caption).foregroundStyle(.orange)
+                        .help("Music sync taps the system audio output and needs Screen Recording permission — System Settings > Privacy & Security > Screen & System Audio Recording")
                 }
                 if controller.screenNoPermission {
                     Image(systemName: "rectangle.on.rectangle.slash")
